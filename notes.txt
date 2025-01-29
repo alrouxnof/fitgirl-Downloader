@@ -1,0 +1,1 @@
+class name to target: 'su-spoiler-content su-u-clearfix su-u-trim' div element 
