@@ -1,1 +1,2 @@
-class name to target: 'su-spoiler-content su-u-clearfix su-u-trim' div element 
+fitgirl page class name to target: 'su-spoiler-content su-u-clearfix su-u-trim' div element
+fuckingfast page class name to target: `mx-auto max-w-[60rem]` div element containing the script element

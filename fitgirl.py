@@ -38,7 +38,13 @@ def main():
     # a_href_class = "your_a_class"  # Uncomment and set if the <a> tag has a specific class
     site = int(input("Enter the site to download: 0-datanodes, 1-fuckingfast (0-1, default is 1): ") or 1)
     script_path = "Downloader.py"
-    file_path = "/home/alrouxnof/programming/python/projects/fitgirl-Downloader/links.txt"
+    file_path = "links.txt"
+
+    # Check if links.txt exists, if not, create it
+    if not os.path.exists(file_path):
+        with open(file_path, 'w'):
+            pass
+        print(f"Created {file_path} because it did not exist.")
 
     try:
         hrefs = extract_links_from_div(url, div_class)  # , a_href_class)
