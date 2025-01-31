@@ -1,6 +1,17 @@
 import requests
 from bs4 import BeautifulSoup
 import runpy
+import os
+import urllib
+from urllib.parse import urlparse
+import re
+
+def is_valid_url(url):
+    try:
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+    except ValueError:
+        return False
 
 def extract_links_from_div(url, div_class, a_href_class=None, site=1):
     # Send a GET request to the URL
@@ -28,12 +39,21 @@ def extract_links_from_div(url, div_class, a_href_class=None, site=1):
     links = []
     for a in second_div.find_all('a', href=True):
         if a_href_class is None or a_href_class in a.get('class', []):
-            links.append(a['href'])
+            base_name = re.sub(r'[^\w\s-]', '', a.text.strip())  # Sanitize the text
+            link_data = {
+                'href': a['href'],
+                'text': base_name # get the inside of <a> tag
+            }
+            links.append(link_data)
 
     return links
 
+
+
 def main():
     url = input("Enter your fitgirl Game Url:  ")  # Replace with the actual URL
+    if not is_valid_url(url):
+        raise ValueError("Invalid URL provided. Please enter a valid URL.")
     div_class = "su-spoiler-content su-u-clearfix su-u-trim"  # Replace with the class of the div
     # a_href_class = "your_a_class"  # Uncomment and set if the <a> tag has a specific class
     site = int(input("Enter the site to download: 0-datanodes, 1-fuckingfast (0-1, default is 1): ") or 1)
@@ -47,12 +67,12 @@ def main():
         print(f"Created {file_path} because it did not exist.")
 
     try:
-        hrefs = extract_links_from_div(url, div_class)  # , a_href_class)
+        hrefs = extract_links_from_div(url, div_class, site=site)     # , a_href_class)
         
         # Write links to a temporary text file
         with open("links.txt", "w") as file:
             for link in hrefs:
-                file.write(f"{link}\n")
+                file.write(f"{link['href']}|{link['text']}\n")
         
         print(f"Links have been written to links.txt. Total links found: {len(hrefs)}")
         runpy.run_path(script_path, run_name="__main__")
@@ -61,7 +81,8 @@ def main():
             pass  # This will clear the file by opening it in write mode and not writing anything
         print(f"Cleaned up {file_path} after download.")
 
-
+    except KeyboardInterrupt:
+        print("\nScript interrupted by user. Exiting...")
     except Exception as e:
         print(f"An error occurred: {e}")
 
