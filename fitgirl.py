@@ -2,89 +2,82 @@ import requests
 from bs4 import BeautifulSoup
 import runpy
 import os
-import urllib
 from urllib.parse import urlparse
-import re
 
 def is_valid_url(url):
+    """Check if the provided URL is valid."""
     try:
         result = urlparse(url)
         return all([result.scheme, result.netloc])
     except ValueError:
         return False
 
-def extract_links_from_div(url, div_class, a_href_class=None, site=1):
-    # Send a GET request to the URL
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise Exception(f"Failed to retrieve the webpage. Status code: {response.status_code}")
+def extract_links_from_div(url, div_class, site=1):
+    """Extract links from the specified div based on site selection."""
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise Exception(f"Failed to retrieve webpage: {e}")
 
-    # Parse the HTML content
     soup = BeautifulSoup(response.text, 'html.parser')
-
-    # Find all divs with the specified class
     divs = soup.find_all('div', class_=div_class)
     
-    # Check if at least second div exists
-    if len(divs) < 2:
-        raise Exception("Could not find a second div with the specified class.")
-    
-    if site > 5:
-        raise Exception("invalid site: please select between 0-Data nodes and 1-Fucking fast or other sites between 0-4.")
+    if len(divs) < site + 1:
+        raise Exception(f"Not enough divs found (required: {site + 1}, found: {len(divs)}).")
+    if site > 5 or site < 0:
+        raise Exception("Invalid site selection (0-5).")
 
-    # Select the second div
-    second_div = divs[site]
+    selected_div = divs[site]
+    links = [a['href'] for a in selected_div.find_all('a', href=True) if a['href']]
     
-    # Find all <a> tags within this div
-    links = []
-    for a in second_div.find_all('a', href=True):
-        if a_href_class is None or a_href_class in a.get('class', []):
-            base_name = re.sub(r'[^\w\s-]', '', a.text.strip())  # Sanitize the text
-            link_data = {
-                'href': a['href'],
-                'text': base_name # get the inside of <a> tag
-            }
-            links.append(link_data)
-
+    if not links:
+        raise Exception(f"No links found in div index {site}.")
+    
     return links
 
-
-
 def main():
-    url = input("Enter your fitgirl Game Url:  ")  # Replace with the actual URL
+    """Main function to extract links and trigger the downloader."""
+    url = input("Enter FitGirl Game URL: ").strip()
     if not is_valid_url(url):
-        raise ValueError("Invalid URL provided. Please enter a valid URL.")
-    div_class = "su-spoiler-content su-u-clearfix su-u-trim"  # Replace with the class of the div
-    # a_href_class = "your_a_class"  # Uncomment and set if the <a> tag has a specific class
-    site = int(input("Enter the site to download: 0-datanodes, 1-fuckingfast (0-1, default is 1): ") or 1)
+        print("Error: Invalid URL. Use format https://example.com.")
+        return
+
+    try:
+        site = int(input("Site (0-DataNodes, 1-FuckingFast, 0-5, default 1): ") or 1)
+    except ValueError:
+        print("Invalid site input. Defaulting to 1 (FuckingFast).")
+        site = 1
+
+    div_class = "su-spoiler-content su-u-clearfix su-u-trim"
     script_path = "Downloader.py"
     file_path = "links.txt"
 
-    # Check if links.txt exists, if not, create it
-    if not os.path.exists(file_path):
-        with open(file_path, 'w'):
-            pass
-        print(f"Created {file_path} because it did not exist.")
+    if not os.path.exists(script_path):
+        print(f"Error: {script_path} not found.")
+        return
 
     try:
-        hrefs = extract_links_from_div(url, div_class, site=site)     # , a_href_class)
-        
-        # Write links to a temporary text file
-        with open("links.txt", "w") as file:
-            for link in hrefs:
-                file.write(f"{link['href']}|{link['text']}\n")
-        
-        print(f"Links have been written to links.txt. Total links found: {len(hrefs)}")
+        print(f"Fetching links from site {site}...")
+        links = extract_links_from_div(url, div_class, site=site)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(links))
+        print(f"Found {len(links)} links.")
+
+        if input(f"Download {len(links)} files? (y/N): ").lower().strip() != 'y':
+            print("Download cancelled.")
+            return
+
+        print("Starting downloads...")
         runpy.run_path(script_path, run_name="__main__")
-        # Clean up the links.txt file after successful download
-        with open(file_path, 'w'):
-            pass  # This will clear the file by opening it in write mode and not writing anything
-        print(f"Cleaned up {file_path} after download.")
+        with open(file_path, 'w', encoding='utf-8'):
+            pass
+        print("Done.")
 
     except KeyboardInterrupt:
-        print("\nScript interrupted by user. Exiting...")
+        print("\nInterrupted by user. Keeping links.txt intact.")
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
