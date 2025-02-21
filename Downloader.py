@@ -1,185 +1,129 @@
-import requests
+import asyncio
+import aiohttp
 from bs4 import BeautifulSoup
-import re
 import os
-import concurrent.futures
-from tqdm import tqdm
-import magic
-import rarfile
-import sys
-import threading
+import re
+from tqdm.asyncio import tqdm
 
-# Global exit flag
-exit_flag = threading.Event()
+async def fetch_html(session, url):
+    async with session.get(url) as response:
+        if response.status == 200:
+            return await response.text()
+        else:
+            raise Exception(f"Failed to fetch HTML from {url}. Status: {response.status}")
 
-def signal_handler(sig, frame):
-    """Handle SIGINT and set exit flag."""
-    print("\nInterrupted by user. Exiting...")
-    exit_flag.set()
-    # Force exit after setting flag to ensure threads stop
-    sys.exit(0)
+def extract_download_url(html, div_class):
+    soup = BeautifulSoup(html, 'html.parser')
+    div = soup.find('div', class_=div_class)
+    if not div:
+        raise Exception(f"No div with class '{div_class}' found.")
+    
+    script = div.find('script')
+    if not script:
+        raise Exception("No script element found within the specified div.")
+    
+    # Look for the download() function and extract the URL
+    match = re.search(r'window\.open\([\'"](.*?)[\'"]\)', script.text)
+    if match:
+        return match.group(1)
+    else:
+        raise Exception("No download URL found in script's download() function.")
 
-import signal
-signal.signal(signal.SIGINT, signal_handler)
-
-def extract_download_url(script_content):
-    """Extract the download URL from the script."""
-    match = re.search(r'window\.open\("([^"]+)"', script_content)
-    return match.group(1) if match else None
-
-def get_filename_from_html(soup):
-    """Extract filename from span element."""
-    outer_div = soup.find('div', class_='mx-auto max-w-[60rem]')
-    if outer_div and (inner_div := outer_div.find('div', class_='max-w-2xl mx-auto text-center')):
-        if span := inner_div.find('span', class_='text-xl'):
-            return span.text.strip()
-    return None
-
-def sanitize_filename(filename):
-    """Sanitize filename and avoid duplicate .rar."""
-    sanitized = ''.join(c for c in filename if c.isalnum() or c in '._- ')
-    return sanitized[:-4] if sanitized.lower().endswith('.rar') else sanitized
-
-def download_file(url, filename, output_dir="downloads", position=None, retries=3):
-    """Download file with progress bar and retries."""
-    if exit_flag.is_set():
-        return None
-
-    base_filename = sanitize_filename(filename)
-    file_path = os.path.join(output_dir, f"{base_filename}.rar")
-    os.makedirs(output_dir, exist_ok=True)
-
-    for attempt in range(retries):
-        if exit_flag.is_set():
-            return None
-        try:
-            # Use a shorter timeout to allow interrupt checking
-            response = requests.get(url, stream=True, timeout=10)
-            response.raise_for_status()
-
-            total_size = int(response.headers.get('content-length', 0))
-            display_name = (base_filename[:17] + '...') if len(base_filename) > 20 else base_filename
-
-            with open(file_path, 'wb') as f, tqdm(total=total_size, unit='B', unit_scale=True, desc=display_name, 
-                                                 bar_format='{desc}: {percentage:3.0f}%|█{bar:10}| {n_fmt}/{total_fmt}',
-                                                 position=position, leave=False) as pbar:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if exit_flag.is_set():
-                        return None
-                    if chunk:
-                        f.write(chunk)
-                        pbar.update(len(chunk))
-            return file_path
-        except (requests.RequestException, TimeoutError) as e:
-            print(f"Attempt {attempt + 1}/{retries} failed for {filename}: {e}")
-            if attempt == retries - 1:
-                print(f"Failed to download {filename} after {retries} attempts.")
-                return None
-            continue
-
-def check_multi_volume_integrity(file_paths, base_name):
-    """Check integrity of multi-volume RAR files."""
-    if exit_flag.is_set():
-        return False
+async def process_url(session, page_url, dest_path, div_class, overall_pbar, base_name):
     try:
-        file_paths.sort()
-        first_volume = next((f for f in file_paths if 'part1' in f.lower()), file_paths[0])
-        with rarfile.RarFile(first_volume) as rf:
-            if rf.testrar() is None:
-                return True
-            print(f"Corrupted multi-volume archive: {base_name}")
-            return False
-    except rarfile.BadRarFile as e:
-        print(f"Integrity check failed for {base_name}: {e}")
-        return False
+        # Split the page_url to get both the URL and the text
+        page_url, link_text = page_url.split('|', 1)
+        html = await fetch_html(session, page_url)
+        download_url = extract_download_url(html, div_class)
+        
+        # Use the text from the <a> tag in the filename
+        filename = f"{base_name}_{download_url.split('/')[-1]}"
+        file_path = os.path.join(dest_path, filename)
+        
+        # Ensure the directory exists
+        directory = os.path.dirname(file_path)
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as e:
+            print(f"Error creating directory {directory}: {e}")
+            raise
+        
+        # Initialize the progress bar with a constant description
+        file_pbar = tqdm(desc=f"Downloading {filename}", unit='B', unit_scale=True, position=1, leave=True, bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]')
+        
+        await download_file(session, download_url, file_path, file_pbar)
+        file_pbar.close()
     except Exception as e:
-        print(f"Error verifying {base_name}: {e}")
-        return False
+        print(f"Error processing {page_url}: {e}")
+    finally:
+        overall_pbar.update(1)
 
-def process_link(link, position, all_files):
-    """Process a single link and download its file."""
-    if exit_flag.is_set():
-        return None, None
+async def download_file(session, url, dest_path, pbar):
+    filename = url.split('/')[-1]
+    file_path = os.path.join(dest_path, filename)
 
-    try:
-        response = requests.get(link, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
+    max_length = 255  # Example limit, adjust as needed
+    if len(filename) > max_length:
+        filename = filename[:max_length - len(os.path.splitext(filename)[1])] + os.path.splitext(filename)[1]
 
-        filename = get_filename_from_html(soup) or "unknown_file"
-        target_div = soup.find('div', class_='mx-auto max-w-[60rem]')
-        if not target_div or not (script_tag := target_div.find('script')):
-            print(f"Invalid page structure for {filename}")
-            return filename, None
-
-        download_url = extract_download_url(script_tag.string)
-        if not download_url:
-            print(f"No download URL found for {filename}")
-            return filename, None
-
-        file_path = download_file(download_url, filename, position=position)
-        all_files[filename] = file_path
-        return filename, file_path
-
-    except requests.RequestException as e:
-        print(f"Failed to fetch {link}: {e}")
-        return filename, None
-
-def process_links():
-    """Read links from links.txt and download files."""
-    try:
-        with open('links.txt', 'r') as f:
-            links = [line.strip() for line in f if line.strip()]
-    except FileNotFoundError:
-        print("Error: links.txt not found")
-        return
-
-    if not links:
-        print("No links to process")
-        return
-
-    default_threads = 1
-    try:
-        max_threads = int(input(f"Simultaneous downloads (default {default_threads}): ") or default_threads)
-        max_threads = max(1, min(max_threads, len(links)))
-    except ValueError:
-        print(f"Invalid input, using {default_threads}")
-        max_threads = default_threads
-
-    print(f"Downloading {len(links)} files with {max_threads} threads...")
-    all_files = {}
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as executor:
+    async with session.get(url) as response:
+        if response.status == 200:
+            total_size = int(response.headers.get('Content-Length', 0))
+            pbar.total = total_size if total_size > 0 else None
+            
+            with open(file_path, 'wb') as f:
+                async for chunk in response.content.iter_chunked(1024):
+                    f.write(chunk)
+                    pbar.update(len(chunk))
+        else:
+            print(f"Failed to download {url}. Status: {response.status}")
+            pbar.close()
+            
+async def main(links_file, dest_path, div_class, max_concurrent=3, base_name=None):
+    tasks = []
+    async with aiohttp.ClientSession() as session:
         try:
-            results = executor.map(lambda x: process_link(*x, all_files), [(link, i) for i, link in enumerate(links)])
-            downloaded_files = {filename: file_path for filename, file_path in results if file_path and not exit_flag.is_set()}
+            with open(links_file, 'r') as file:
+                urls = [line.strip() for line in file if line.strip()]
+                overall_pbar = tqdm(total=len(urls), desc="Total Progress", position=0)
+                
+                for url in urls:
+                    tasks.append(process_url(session, url, dest_path, div_class, overall_pbar, base_name))
+                    if len(tasks) >= max_concurrent:
+                        await asyncio.gather(*tasks)
+                        tasks = []
+                
+                if tasks:
+                    await asyncio.gather(*tasks)
+                
+                overall_pbar.close()
+            
+            with open(links_file, 'w'):
+                pass
+            print(f"Cleaned up {links_file} after download.")
+        
         except KeyboardInterrupt:
-            exit_flag.set()
-            executor.shutdown(wait=False, cancel_futures=True)
-            return
-
-        if exit_flag.is_set():
-            return
-
-        if downloaded_files:
-            base_name = min(downloaded_files.keys(), key=len)
-            if any('part' in fname.lower() for fname in downloaded_files):
-                file_paths = [fp for fp in downloaded_files.values() if fp]
-                if check_multi_volume_integrity(file_paths, base_name):
-                    print(f"{base_name} (multi-volume): Downloaded and verified")
-                else:
-                    print(f"{base_name} (multi-volume): Failed verification, removing files")
-                    for fp in file_paths:
-                        if os.path.exists(fp):
-                            os.remove(fp)
-            else:
-                for filename, file_path in downloaded_files.items():
-                    file_type = magic.from_file(file_path, mime=True)
-                    if 'rar' not in file_type.lower() or check_multi_volume_integrity([file_path], filename):
-                        print(f"{filename}: Downloaded and verified")
-                    else:
-                        print(f"{filename}: Failed verification, removed")
-                        os.remove(file_path)
+            print("\nDownload interrupted by user. Exiting...")
+        except Exception as e:
+            print(f"An error occurred during download: {e}")
+        finally:
+            if 'overall_pbar' in locals():
+                overall_pbar.close()
+            for task in tasks:
+                if hasattr(task, 'pbar'):
+                    task.pbar.close()
 
 if __name__ == "__main__":
-    process_links()
+    links_file = "links.txt"
+    download_directory = "downloads"
+    div_class = "mx-auto max-w-[60rem]"
+    max_concurrent_downloads = 3
+    
+    base_name = globals().get('base_name', 'unknown')
+
+    os.makedirs(download_directory, exist_ok=True)
+    
+    try:
+        asyncio.run(main(links_file, download_directory, div_class, max_concurrent_downloads, base_name))
+    except KeyboardInterrupt:
+        print("\nDownload interrupted by user. Exiting...")
